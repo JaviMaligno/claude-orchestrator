@@ -1,6 +1,6 @@
 """Claude Orchestrator - Run parallel Claude Code agents on multiple tasks."""
 
-__version__ = "0.4.7"
+__version__ = "0.4.8"
 
 from claude_orchestrator.config import Config, ReviewConfig, load_config
 from claude_orchestrator.git_provider import GitProvider, GitProviderStatus, get_provider_status

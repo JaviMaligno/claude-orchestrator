@@ -56,6 +56,7 @@ def validate_and_prompt_config(config: Config, project_dir: Path) -> Config:
     """Validate config and prompt for missing required values.
 
     Shows auto-detected values and prompts for any that couldn't be detected.
+    Only prompts if values are missing or auto-detected defaults need confirmation.
 
     Args:
         config: Loaded configuration
@@ -73,21 +74,12 @@ def validate_and_prompt_config(config: Config, project_dir: Path) -> Config:
         config.git.repo_slug = typer.prompt("Enter Bitbucket repository slug")
         needs_save = True
 
-    # Check base_branch
-    if not config.git.base_branch or config.git.base_branch == "main":
-        # Show what was detected
-        detected = config.git.base_branch
-        console.print(f"[dim]Auto-detected base_branch: {detected}[/dim]")
-        if not typer.confirm(f"Use '{detected}' as base branch?", default=True):
-            config.git.base_branch = typer.prompt("Enter base branch", default=detected)
-            config.git.destination_branch = config.git.base_branch
-            needs_save = True
-
-    # Show summary of auto-detected config
+    # Show summary of config (no prompting if already configured)
     console.print("\n[bold]Configuration:[/bold]")
     console.print(f"  repo_slug: [cyan]{config.git.repo_slug}[/cyan]")
     console.print(f"  base_branch: [cyan]{config.git.base_branch}[/cyan]")
     console.print(f"  destination_branch: [cyan]{config.git.destination_branch}[/cyan]")
+    console.print()
 
     # Save if modified
     if needs_save:
