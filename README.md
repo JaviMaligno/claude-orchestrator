@@ -73,14 +73,20 @@ claude-orchestrator run --from-todo todo.md --execute
 
 ## Configuration
 
+Configuration is loaded from two sources (later overrides earlier):
+1. **Global config**: `~/.config/claude-orchestrator/config.yaml`
+2. **Project config**: `.claude-orchestrator.yaml`
+
+### Project Configuration
+
 Create `.claude-orchestrator.yaml` in your project root:
 
 ```yaml
 # Git settings (auto-detected if not specified)
 git:
   provider: auto  # "bitbucket" / "github" / auto-detect
-  base_branch: main
-  destination_branch: main
+  base_branch: develop
+  destination_branch: develop
   repo_slug: my-repo  # Required for Bitbucket
 
 worktree_dir: ../worktrees
@@ -90,8 +96,6 @@ mcps:
   enabled:
     - atlassian    # For Jira ticket updates
     - linear       # For issue tracking
-    - postgres     # For database access
-    - chrome       # For browser automation
 
 # Project context (auto-discovered if not specified)
 project:
@@ -100,6 +104,20 @@ project:
     - tests/
   test_command: pytest tests/
 ```
+
+### Global Configuration
+
+Set defaults that apply to all projects:
+
+```bash
+# Set global default base branch
+claude-orchestrator config --global git.base_branch develop
+
+# View global config
+claude-orchestrator config --global --list
+```
+
+Global config is stored in `~/.config/claude-orchestrator/config.yaml`.
 
 ## CLI Commands
 
@@ -140,6 +158,33 @@ Generate task configuration from a todo file:
 ```bash
 claude-orchestrator generate --from-todo todo.md
 ```
+
+### `config`
+
+Get or set configuration values (similar to `git config` or `gh config`):
+
+```bash
+# List all configuration (merged: global + project)
+claude-orchestrator config --list
+
+# Get a specific value
+claude-orchestrator config git.base_branch
+
+# Set a project-level value
+claude-orchestrator config git.base_branch develop
+
+# Set a global value (applies to all projects)
+claude-orchestrator config --global git.base_branch develop
+```
+
+Available keys:
+- `git.provider` - Git provider ("auto", "github", "bitbucket")
+- `git.base_branch` - Base branch for PRs
+- `git.destination_branch` - Target branch for PRs
+- `git.repo_slug` - Repository slug (Bitbucket)
+- `worktree_dir` - Directory for git worktrees
+- `project.test_command` - Test command to run
+- `mcps.enabled` - Comma-separated list of MCPs
 
 ### `run`
 
