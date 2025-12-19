@@ -1,6 +1,8 @@
 """Configuration handling for claude-orchestrator.
 
-Handles loading, saving, and validating .claude-orchestrator.yaml configuration.
+Handles loading, saving, and validating configuration:
+- Global: ~/.config/claude-orchestrator/config.yaml
+- Project: .claude-orchestrator.yaml
 """
 from __future__ import annotations
 
@@ -14,6 +16,8 @@ from claude_orchestrator.mcp_registry import AuthType, register_custom_mcp
 
 
 CONFIG_FILENAME = ".claude-orchestrator.yaml"
+GLOBAL_CONFIG_DIR = Path.home() / ".config" / "claude-orchestrator"
+GLOBAL_CONFIG_FILE = GLOBAL_CONFIG_DIR / "config.yaml"
 
 
 @dataclass
@@ -58,8 +62,59 @@ class Config:
     project_root: Optional[Path] = None
 
 
+def _merge_configs(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Deep merge two configuration dictionaries.
+
+    Args:
+        base: Base configuration (lower priority)
+        override: Override configuration (higher priority)
+
+    Returns:
+        Merged configuration dictionary
+    """
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _merge_configs(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def load_global_config() -> dict[str, Any]:
+    """Load global configuration from ~/.config/claude-orchestrator/config.yaml.
+
+    Returns:
+        Dictionary with global configuration values
+    """
+    if not GLOBAL_CONFIG_FILE.exists():
+        return {}
+
+    try:
+        with open(GLOBAL_CONFIG_FILE) as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+
+def save_global_config(data: dict[str, Any]) -> None:
+    """Save global configuration.
+
+    Args:
+        data: Configuration dictionary to save
+    """
+    GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(GLOBAL_CONFIG_FILE, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+
 def load_config(project_root: Optional[Path] = None) -> Config:
-    """Load configuration from .claude-orchestrator.yaml.
+    """Load configuration from .claude-orchestrator.yaml with global fallbacks.
+
+    Configuration is loaded in this order (later overrides earlier):
+    1. Default values
+    2. Global config (~/.config/claude-orchestrator/config.yaml)
+    3. Project config (.claude-orchestrator.yaml)
 
     Args:
         project_root: Root directory of the project. If None, uses current directory.
@@ -73,13 +128,22 @@ def load_config(project_root: Optional[Path] = None) -> Config:
     config_path = project_root / CONFIG_FILENAME
     config = Config(project_root=project_root)
 
-    if not config_path.exists():
-        return config
+    # Load global config first
+    global_data = load_global_config()
+    
+    # Load project config
+    project_data: dict[str, Any] = {}
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                project_data = yaml.safe_load(f) or {}
+        except Exception:
+            pass
 
-    try:
-        with open(config_path) as f:
-            data = yaml.safe_load(f) or {}
-    except Exception:
+    # Merge: global -> project (project overrides global)
+    data = _merge_configs(global_data, project_data)
+
+    if not data:
         return config
 
     # Parse git config

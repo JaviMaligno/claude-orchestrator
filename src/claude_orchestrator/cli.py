@@ -12,9 +12,23 @@ from rich.console import Console
 from rich.table import Table
 
 from claude_orchestrator import __version__
-from claude_orchestrator.config import Config, GitConfig, config_exists, load_config, save_config
+from claude_orchestrator.config import (
+    Config,
+    GitConfig,
+    config_exists,
+    load_config,
+    save_config,
+    load_global_config,
+    save_global_config,
+    GLOBAL_CONFIG_FILE,
+)
 from claude_orchestrator.discovery import discover_sync
-from claude_orchestrator.git_provider import GitProvider, get_provider_status
+from claude_orchestrator.git_provider import (
+    GitProvider,
+    get_provider_status,
+    get_default_branch,
+    get_current_branch,
+)
 from claude_orchestrator.mcp_registry import AuthType, get_all_mcp_statuses, get_mcp_status
 from claude_orchestrator.orchestrator import run_tasks_sync
 from claude_orchestrator.task_generator import (
@@ -114,12 +128,28 @@ def doctor(
         mcp_list = [m.strip() for m in mcps.split(",")]
     elif config.mcps.enabled:
         mcp_list = config.mcps.enabled
-    else:
-        # Check common MCPs
-        mcp_list = ["bitbucket", "atlassian", "linear", "postgres", "chrome"]
+    # Only check git provider MCP if needed (Bitbucket needs MCP, GitHub uses gh CLI)
+    # Don't show all MCPs by default - only what's configured or explicitly requested
 
-    # Get status of each MCP
+    # Check git provider MCP status (only for Bitbucket)
+    if provider_status.provider == GitProvider.BITBUCKET:
+        status = get_mcp_status("bitbucket")
+        if status.is_ready:
+            console.print(f"  [green]✓[/green] bitbucket: ready")
+        elif status.is_configured:
+            console.print(f"  [green]✓[/green] bitbucket: configured")
+        else:
+            console.print(f"  [red]✗[/red] bitbucket: not configured")
+            if status.setup_instructions:
+                console.print(f"      Setup:\n{status.setup_instructions}")
+    elif provider_status.provider == GitProvider.GITHUB:
+        console.print(f"  [dim]○[/dim] Using gh CLI for GitHub (no MCP needed)")
+
+    # Get status of explicitly enabled MCPs from config
     for mcp_name in mcp_list:
+        if mcp_name == "bitbucket":
+            continue  # Already handled above
+        
         status = get_mcp_status(mcp_name)
 
         if status.is_ready:
@@ -130,13 +160,12 @@ def doctor(
             else:
                 console.print(f"  [yellow]![/yellow] {mcp_name}: {status.message}")
         else:
-            # Check if it's needed
-            if mcp_name == "bitbucket" and provider_status.provider != GitProvider.BITBUCKET:
-                console.print(f"  [dim]○[/dim] {mcp_name}: not needed (using {provider_name})")
-            else:
-                console.print(f"  [red]✗[/red] {mcp_name}: not configured")
-                if status.setup_instructions:
-                    console.print(f"      Setup:\n{status.setup_instructions}")
+            console.print(f"  [red]✗[/red] {mcp_name}: not configured")
+            if status.setup_instructions:
+                console.print(f"      Setup:\n{status.setup_instructions}")
+    
+    if not mcp_list and provider_status.provider != GitProvider.BITBUCKET:
+        console.print("  [dim]○[/dim] No additional MCPs configured")
 
     console.print()
 
@@ -182,6 +211,11 @@ def init(
 
     console.print(f"  Provider: {provider_name}")
 
+    # Detect default branch
+    console.print("Detecting default branch...")
+    default_branch = get_default_branch(str(project_dir)) or "main"
+    console.print(f"  Default branch: {default_branch}")
+
     # Discover project
     console.print("\nAnalyzing project structure...")
     context = discover_sync(project_dir, use_claude=use_claude)
@@ -196,8 +230,8 @@ def init(
         project_root=project_dir,
         git=GitConfig(
             provider=provider_name,
-            base_branch="main",
-            destination_branch="main",
+            base_branch=default_branch,
+            destination_branch=default_branch,
             repo_slug=provider_status.repo_info.get("repo") if provider_status.repo_info else None,
         ),
     )
@@ -412,6 +446,181 @@ def run(
     # Exit with appropriate code
     failed = sum(1 for r in results if r.status == "failed")
     raise typer.Exit(1 if failed > 0 else 0)
+
+
+@app.command()
+def config(
+    key: str = typer.Argument(
+        None,
+        help="Configuration key (e.g., git.base_branch, git.repo_slug)",
+    ),
+    value: str = typer.Argument(
+        None,
+        help="Value to set",
+    ),
+    list_all: bool = typer.Option(
+        False,
+        "--list",
+        "-l",
+        help="List all configuration values.",
+    ),
+    is_global: bool = typer.Option(
+        False,
+        "--global",
+        "-g",
+        help="Use global configuration (~/.config/claude-orchestrator/config.yaml).",
+    ),
+    project_dir: Path = typer.Option(
+        Path.cwd(),
+        "--project-dir",
+        "-d",
+        help="Project directory.",
+    ),
+):
+    """Get or set configuration values.
+
+    Similar to 'git config' or 'gh config'.
+
+    Configuration priority (higher overrides lower):
+      1. Project config (.claude-orchestrator.yaml)
+      2. Global config (~/.config/claude-orchestrator/config.yaml)
+      3. Default values
+
+    Examples:
+        claude-orchestrator config --list
+        claude-orchestrator config git.base_branch
+        claude-orchestrator config git.base_branch develop
+        claude-orchestrator config --global git.base_branch develop
+    """
+    if is_global:
+        # Handle global config
+        global_data = load_global_config()
+
+        if list_all:
+            console.print(f"\n[bold]Global Configuration[/bold] ({GLOBAL_CONFIG_FILE})\n")
+            if not global_data:
+                console.print("  [dim](no global config set)[/dim]")
+            else:
+                _print_nested_config(global_data, "  ")
+            console.print()
+            return
+
+        if key is None:
+            console.print("Usage: claude-orchestrator config --global [KEY] [VALUE]")
+            console.print("       claude-orchestrator config --global --list")
+            return
+
+        # Get value from global config
+        if value is None:
+            val = _get_nested_value(global_data, key)
+            console.print(val if val is not None else "")
+            return
+
+        # Set value in global config
+        _set_nested_value(global_data, key, value)
+        save_global_config(global_data)
+        console.print(f"[green]✓[/green] Set global {key} = {value}")
+        return
+
+    # Handle project config
+    cfg = load_config(project_dir)
+
+    if list_all:
+        console.print("\n[bold]Configuration[/bold] (merged: global + project)\n")
+        console.print(f"  git.provider: {cfg.git.provider}")
+        console.print(f"  git.base_branch: {cfg.git.base_branch}")
+        console.print(f"  git.destination_branch: {cfg.git.destination_branch}")
+        console.print(f"  git.repo_slug: {cfg.git.repo_slug or '(auto)'}")
+        console.print(f"  worktree_dir: {cfg.worktree_dir}")
+        if cfg.mcps.enabled:
+            console.print(f"  mcps.enabled: {', '.join(cfg.mcps.enabled)}")
+        if cfg.project.test_command:
+            console.print(f"  project.test_command: {cfg.project.test_command}")
+        console.print()
+        return
+
+    if key is None:
+        console.print("Usage: claude-orchestrator config [KEY] [VALUE]")
+        console.print("       claude-orchestrator config --list")
+        console.print("       claude-orchestrator config --global [KEY] [VALUE]")
+        return
+
+    # Get value
+    if value is None:
+        if key == "git.provider":
+            console.print(cfg.git.provider)
+        elif key == "git.base_branch":
+            console.print(cfg.git.base_branch)
+        elif key == "git.destination_branch":
+            console.print(cfg.git.destination_branch)
+        elif key == "git.repo_slug":
+            console.print(cfg.git.repo_slug or "")
+        elif key == "worktree_dir":
+            console.print(cfg.worktree_dir)
+        elif key == "project.test_command":
+            console.print(cfg.project.test_command or "")
+        else:
+            console.print(f"[red]Unknown key: {key}[/red]")
+        return
+
+    # Set value
+    if key == "git.provider":
+        cfg.git.provider = value
+    elif key == "git.base_branch":
+        cfg.git.base_branch = value
+    elif key == "git.destination_branch":
+        cfg.git.destination_branch = value
+    elif key == "git.repo_slug":
+        cfg.git.repo_slug = value
+    elif key == "worktree_dir":
+        cfg.worktree_dir = value
+    elif key == "project.test_command":
+        cfg.project.test_command = value
+    elif key.startswith("mcps.enabled"):
+        # mcps.enabled can be comma-separated
+        cfg.mcps.enabled = [v.strip() for v in value.split(",")]
+    else:
+        console.print(f"[red]Unknown key: {key}[/red]")
+        raise typer.Exit(1)
+
+    save_config(cfg, project_dir)
+    console.print(f"[green]✓[/green] Set {key} = {value}")
+
+
+def _get_nested_value(data: dict, key: str):
+    """Get a nested value from a dictionary using dot notation."""
+    parts = key.split(".")
+    current = data
+    for part in parts:
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        else:
+            return None
+    return current
+
+
+def _set_nested_value(data: dict, key: str, value: str):
+    """Set a nested value in a dictionary using dot notation."""
+    parts = key.split(".")
+    current = data
+    for part in parts[:-1]:
+        if part not in current:
+            current[part] = {}
+        current = current[part]
+    
+    # Handle comma-separated values for lists
+    if parts[-1] == "enabled":
+        current[parts[-1]] = [v.strip() for v in value.split(",")]
+    else:
+        current[parts[-1]] = value
+
+
+def _print_nested_config(data: dict, prefix: str = ""):
+    """Print nested configuration dictionary."""
+    for key, value in data.items():
+        if isinstance(value, dict):
+            for subkey, subvalue in value.items():
+                console.print(f"{prefix}{key}.{subkey}: {subvalue}")
 
 
 @app.command()

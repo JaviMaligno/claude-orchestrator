@@ -36,6 +36,57 @@ class TasksConfig:
     tasks: list[TaskConfig] = field(default_factory=list)
 
 
+import re
+
+
+def _extract_yaml_from_output(output: str) -> Optional[str]:
+    """Extract YAML content from Claude output.
+
+    Handles various output formats:
+    - Bare YAML
+    - YAML in ```yaml``` fences
+    - YAML with preamble text
+
+    Args:
+        output: Raw output from Claude
+
+    Returns:
+        Extracted YAML string or None
+    """
+    # First, try to extract from markdown fences
+    # Match ```yaml or ``` followed by content
+    fence_patterns = [
+        re.compile(r"```yaml\n(.*?)```", re.DOTALL),
+        re.compile(r"```yml\n(.*?)```", re.DOTALL),
+        re.compile(r"```\n(.*?)```", re.DOTALL),
+    ]
+
+    for pattern in fence_patterns:
+        matches = pattern.findall(output)
+        for match in matches:
+            # Check if this looks like valid task config
+            if "settings:" in match and "tasks:" in match:
+                return match.strip()
+            elif "tasks:" in match:
+                return match.strip()
+
+    # No fenced block found, try to extract by finding YAML markers
+    # Look for settings: at the start of a line
+    if "\nsettings:" in output or output.startswith("settings:"):
+        idx = output.find("settings:")
+        yaml_str = output[idx:]
+        # Remove any trailing non-YAML content
+        return yaml_str.strip()
+
+    # Look for tasks: at the start of a line
+    if "\ntasks:" in output or output.startswith("tasks:"):
+        idx = output.find("tasks:")
+        yaml_str = output[idx:]
+        return yaml_str.strip()
+
+    return None
+
+
 def build_generation_prompt(
     todo_content: str,
     project_context: Optional[ProjectContext] = None,
@@ -183,30 +234,16 @@ async def generate_tasks_with_claude(
             return None
 
         output = stdout.decode().strip()
-
-        # Try to extract YAML from output
-        yaml_str = output
-
-        # Handle markdown fences
-        if "```yaml" in output:
-            start = output.find("```yaml") + 7
-            end = output.find("```", start)
-            yaml_str = output[start:end].strip()
-        elif "```" in output:
-            start = output.find("```") + 3
-            end = output.find("```", start)
-            yaml_str = output[start:end].strip()
-
-        # Find YAML start markers
-        for marker in ["settings:", "tasks:"]:
-            if marker in yaml_str:
-                idx = yaml_str.find(marker)
-                if idx > 0:
-                    yaml_str = yaml_str[idx:]
-                break
+        
+        yaml_str = _extract_yaml_from_output(output)
+        if not yaml_str:
+            return None
 
         # Parse YAML
-        data = yaml.safe_load(yaml_str)
+        try:
+            data = yaml.safe_load(yaml_str)
+        except yaml.YAMLError:
+            return None
 
         if not data or "tasks" not in data:
             return None
@@ -225,8 +262,19 @@ async def generate_tasks_with_claude(
                 )
             )
 
+        # Build settings from project config (don't trust Claude's generated settings)
+        settings = {
+            "worktree_dir": "../worktrees",
+            "auto_cleanup": True,
+        }
+        if config:
+            settings["base_branch"] = config.git.base_branch
+            settings["destination_branch"] = config.git.destination_branch
+            if config.git.repo_slug:
+                settings["repo_slug"] = config.git.repo_slug
+
         return TasksConfig(
-            settings=data.get("settings", {}),
+            settings=settings,
             tasks=tasks,
         )
 

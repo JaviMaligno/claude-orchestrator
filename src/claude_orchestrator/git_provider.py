@@ -62,6 +62,67 @@ def detect_provider(cwd: Optional[str] = None) -> GitProvider:
         return GitProvider.UNKNOWN
 
 
+def get_current_branch(cwd: Optional[str] = None) -> Optional[str]:
+    """Get the current git branch.
+
+    Args:
+        cwd: Working directory
+
+    Returns:
+        Current branch name or None
+    """
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip() or None
+        return None
+    except Exception:
+        return None
+
+
+def get_default_branch(cwd: Optional[str] = None) -> Optional[str]:
+    """Get the default branch from remote origin.
+
+    Args:
+        cwd: Working directory
+
+    Returns:
+        Default branch name (e.g., 'main', 'master', 'develop') or None
+    """
+    try:
+        # Try to get from remote
+        result = subprocess.run(
+            ["git", "remote", "show", "origin"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.split("\n"):
+                if "HEAD branch:" in line:
+                    return line.split(":")[-1].strip()
+        
+        # Fallback: check common branch names
+        for branch in ["main", "master", "develop"]:
+            result = subprocess.run(
+                ["git", "rev-parse", "--verify", f"origin/{branch}"],
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+            )
+            if result.returncode == 0:
+                return branch
+        
+        return None
+    except Exception:
+        return None
+
+
 def parse_remote_url(cwd: Optional[str] = None) -> Optional[dict]:
     """Parse git remote URL to extract owner and repo.
 
