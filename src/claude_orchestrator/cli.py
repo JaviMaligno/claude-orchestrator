@@ -15,6 +15,7 @@ from claude_orchestrator import __version__
 from claude_orchestrator.config import (
     Config,
     GitConfig,
+    WorkflowConfig,
     config_exists,
     load_config,
     save_config,
@@ -334,6 +335,11 @@ def run(
         "-e",
         help="Execute tasks after generating (requires --from-todo).",
     ),
+    yolo: bool = typer.Option(
+        False,
+        "--yolo",
+        help="YOLO mode: generate, execute, and create PRs without stopping.",
+    ),
     tasks: Optional[str] = typer.Option(
         None,
         "--tasks",
@@ -377,7 +383,29 @@ def run(
     """Run tasks using Claude Code agents.
 
     Each task runs in its own git worktree with a dedicated agent.
+    
+    Workflow modes:
+      - Default: Generate tasks, stop for review
+      - --execute: Generate and execute, stop before PRs
+      - --yolo: Generate, execute, and create PRs without stopping
     """
+    # Load project config early for workflow settings
+    config = load_config(project_dir)
+    
+    # YOLO mode overrides everything
+    if yolo:
+        execute = True
+        auto_approve = config.workflow.auto_approve or auto_approve
+        if not no_pr:
+            no_pr = not config.workflow.auto_pr
+    else:
+        # Apply workflow config defaults
+        auto_approve = auto_approve or config.workflow.auto_approve
+        if config.workflow.mode == "yolo":
+            execute = True
+            if not no_pr:
+                no_pr = not config.workflow.auto_pr
+
     # Handle --from-todo
     if from_todo:
         if not from_todo.exists():
@@ -385,9 +413,6 @@ def run(
             raise typer.Exit(1)
 
         console.print("[bold]Generating tasks from todo...[/bold]\n")
-
-        # Load config
-        config = load_config(project_dir)
 
         # Discover project
         context = discover_sync(project_dir, use_claude=False)
@@ -404,8 +429,11 @@ def run(
 
         console.print(f"[green]✓[/green] Generated {len(tasks_config.tasks)} task(s)")
 
-        if not execute:
-            console.print(f"\nReview {config_file} and run: claude-orchestrator run")
+        # Check if we should stop after generate (unless yolo or execute)
+        should_stop = config.workflow.stop_after_generate and not execute and not yolo
+        if should_stop:
+            console.print(f"\n[dim]Review {config_file} and run: claude-orchestrator run[/dim]")
+            console.print("[dim]Or use --execute or --yolo to continue automatically[/dim]")
             raise typer.Exit()
 
         console.print("\n" + "=" * 60)
@@ -422,9 +450,6 @@ def run(
     if not tasks_config.tasks:
         console.print("[yellow]No tasks to run[/yellow]")
         raise typer.Exit()
-
-    # Load project config
-    config = load_config(project_dir)
 
     # Parse task IDs
     task_ids = [t.strip() for t in tasks.split(",")] if tasks else None
@@ -445,6 +470,92 @@ def run(
 
     # Exit with appropriate code
     failed = sum(1 for r in results if r.status == "failed")
+    raise typer.Exit(1 if failed > 0 else 0)
+
+
+@app.command()
+def yolo(
+    from_todo: Path = typer.Argument(
+        ...,
+        help="Path to todo.md file.",
+    ),
+    config_file: Path = typer.Option(
+        Path("task_config.yaml"),
+        "--config",
+        "-c",
+        help="Path to task configuration file.",
+    ),
+    tasks: Optional[str] = typer.Option(
+        None,
+        "--tasks",
+        help="Comma-separated task IDs to run (default: all).",
+    ),
+    sequential: bool = typer.Option(
+        False,
+        "--sequential",
+        "-s",
+        help="Run tasks sequentially instead of in parallel.",
+    ),
+    project_dir: Path = typer.Option(
+        Path.cwd(),
+        "--project-dir",
+        "-d",
+        help="Project directory.",
+    ),
+):
+    """YOLO mode: Generate tasks, execute, and create PRs without stopping.
+
+    This is a shortcut for:
+        claude-orchestrator run --from-todo TODO.md --yolo
+
+    Example:
+        claude-orchestrator yolo TODO.md
+    """
+    # Load config
+    config = load_config(project_dir)
+
+    if not from_todo.exists():
+        console.print(f"[red]Error: Todo file not found: {from_todo}[/red]")
+        raise typer.Exit(1)
+
+    console.print("[bold yellow]🚀 YOLO MODE[/bold yellow]")
+    console.print("[dim]Generating → Executing → Creating PRs (no stops)[/dim]\n")
+
+    # Generate tasks
+    console.print("[bold]Step 1: Generating tasks...[/bold]")
+    context = discover_sync(project_dir, use_claude=False)
+    tasks_config = generate_tasks_sync(from_todo, context, config)
+
+    if not tasks_config or not tasks_config.tasks:
+        console.print("[red]Error: Failed to generate tasks[/red]")
+        raise typer.Exit(1)
+
+    save_tasks_config(tasks_config, config_file)
+    console.print(f"[green]✓[/green] Generated {len(tasks_config.tasks)} task(s)\n")
+
+    # Execute tasks
+    console.print("[bold]Step 2: Executing tasks...[/bold]")
+    task_ids = [t.strip() for t in tasks.split(",")] if tasks else None
+
+    results = run_tasks_sync(
+        tasks_config=tasks_config,
+        config=config,
+        task_ids=task_ids,
+        auto_approve=config.workflow.auto_approve,
+        keep_worktrees=False,
+        dry_run=False,
+        no_pr=not config.workflow.auto_pr,
+        sequential=sequential,
+    )
+
+    # Summary
+    console.print("\n[bold]Summary[/bold]")
+    succeeded = sum(1 for r in results if r.status == "success")
+    failed = sum(1 for r in results if r.status == "failed")
+    console.print(f"  [green]✓[/green] Succeeded: {succeeded}")
+    if failed > 0:
+        console.print(f"  [red]✗[/red] Failed: {failed}")
+
     raise typer.Exit(1 if failed > 0 else 0)
 
 
@@ -527,14 +638,22 @@ def config(
 
     if list_all:
         console.print("\n[bold]Configuration[/bold] (merged: global + project)\n")
+        console.print("[dim]# Git[/dim]")
         console.print(f"  git.provider: {cfg.git.provider}")
         console.print(f"  git.base_branch: {cfg.git.base_branch}")
         console.print(f"  git.destination_branch: {cfg.git.destination_branch}")
         console.print(f"  git.repo_slug: {cfg.git.repo_slug or '(auto)'}")
         console.print(f"  worktree_dir: {cfg.worktree_dir}")
+        console.print("[dim]# Workflow[/dim]")
+        console.print(f"  workflow.mode: {cfg.workflow.mode}")
+        console.print(f"  workflow.stop_after_generate: {cfg.workflow.stop_after_generate}")
+        console.print(f"  workflow.auto_approve: {cfg.workflow.auto_approve}")
+        console.print(f"  workflow.auto_pr: {cfg.workflow.auto_pr}")
         if cfg.mcps.enabled:
+            console.print("[dim]# MCPs[/dim]")
             console.print(f"  mcps.enabled: {', '.join(cfg.mcps.enabled)}")
         if cfg.project.test_command:
+            console.print("[dim]# Project[/dim]")
             console.print(f"  project.test_command: {cfg.project.test_command}")
         console.print()
         return
@@ -559,6 +678,14 @@ def config(
             console.print(cfg.worktree_dir)
         elif key == "project.test_command":
             console.print(cfg.project.test_command or "")
+        elif key == "workflow.mode":
+            console.print(cfg.workflow.mode)
+        elif key == "workflow.stop_after_generate":
+            console.print(str(cfg.workflow.stop_after_generate).lower())
+        elif key == "workflow.auto_approve":
+            console.print(str(cfg.workflow.auto_approve).lower())
+        elif key == "workflow.auto_pr":
+            console.print(str(cfg.workflow.auto_pr).lower())
         else:
             console.print(f"[red]Unknown key: {key}[/red]")
         return
@@ -577,8 +704,18 @@ def config(
     elif key == "project.test_command":
         cfg.project.test_command = value
     elif key.startswith("mcps.enabled"):
-        # mcps.enabled can be comma-separated
         cfg.mcps.enabled = [v.strip() for v in value.split(",")]
+    elif key == "workflow.mode":
+        if value not in ("review", "yolo"):
+            console.print(f"[red]Invalid mode: {value}. Use 'review' or 'yolo'[/red]")
+            raise typer.Exit(1)
+        cfg.workflow.mode = value
+    elif key == "workflow.stop_after_generate":
+        cfg.workflow.stop_after_generate = value.lower() in ("true", "1", "yes")
+    elif key == "workflow.auto_approve":
+        cfg.workflow.auto_approve = value.lower() in ("true", "1", "yes")
+    elif key == "workflow.auto_pr":
+        cfg.workflow.auto_pr = value.lower() in ("true", "1", "yes")
     else:
         console.print(f"[red]Unknown key: {key}[/red]")
         raise typer.Exit(1)

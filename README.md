@@ -185,23 +185,80 @@ Available keys:
 - `worktree_dir` - Directory for git worktrees
 - `project.test_command` - Test command to run
 - `mcps.enabled` - Comma-separated list of MCPs
+- `workflow.mode` - Workflow mode ("review" or "yolo")
+- `workflow.auto_approve` - Auto-approve agent actions (true/false)
+- `workflow.auto_pr` - Create PRs automatically (true/false)
+- `workflow.stop_after_generate` - Stop after generating tasks (true/false)
 
 ### `run`
 
 Execute tasks:
 
 ```bash
-# Run all tasks
+# Run all tasks (from existing task_config.yaml)
 claude-orchestrator run
 
 # Run specific tasks
 claude-orchestrator run --tasks task1,task2
 
+# Generate from todo, stop for review (default)
+claude-orchestrator run --from-todo todo.md
+
+# Generate and execute without stopping
+claude-orchestrator run --from-todo todo.md --execute
+
+# YOLO: Generate, execute, and create PRs without stopping
+claude-orchestrator run --from-todo todo.md --yolo
+
 # Auto-approve all agent actions
 claude-orchestrator run --auto-approve
+```
 
-# Full pipeline
-claude-orchestrator run --from-todo todo.md --execute
+### `yolo`
+
+Shortcut for full YOLO mode:
+
+```bash
+# Generate tasks, execute, and create PRs in one go
+claude-orchestrator yolo TODO.md
+
+# Equivalent to:
+claude-orchestrator run --from-todo TODO.md --yolo
+```
+
+## Workflow Modes
+
+Configure how much the orchestrator stops for review:
+
+| Mode | Description |
+|------|-------------|
+| `review` (default) | Stop after generating tasks for review |
+| `yolo` | Run everything without stopping |
+
+### Configure via CLI
+
+```bash
+# Set workflow mode globally
+claude-orchestrator config --global workflow.mode yolo
+
+# Or per-project
+claude-orchestrator config workflow.mode yolo
+
+# Enable auto-approve (agents won't ask for confirmation)
+claude-orchestrator config workflow.auto_approve true
+
+# Disable automatic PR creation
+claude-orchestrator config workflow.auto_pr false
+```
+
+### Configure in `.claude-orchestrator.yaml`
+
+```yaml
+workflow:
+  mode: yolo           # "review" or "yolo"
+  auto_approve: true   # Automatically approve agent actions
+  auto_pr: true        # Create PRs automatically
+  stop_after_generate: false  # Fine-grained: stop after task generation
 ```
 
 ## Optional MCPs

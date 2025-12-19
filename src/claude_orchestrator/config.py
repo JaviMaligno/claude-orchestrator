@@ -33,6 +33,24 @@ class GitConfig:
 
 
 @dataclass
+class WorkflowConfig:
+    """Workflow mode configuration."""
+
+    # Execution mode: "review" (stop after each step), "yolo" (run everything)
+    mode: str = "review"
+    
+    # Fine-grained stop points (only apply in "review" mode)
+    stop_after_generate: bool = True  # Stop after generating tasks
+    stop_after_run: bool = False  # Stop after running tasks (before PRs)
+    
+    # Auto-approve agent actions (dangerous but fast)
+    auto_approve: bool = False
+    
+    # Create PRs automatically
+    auto_pr: bool = True
+
+
+@dataclass
 class MCPConfig:
     """MCP-related configuration."""
 
@@ -57,6 +75,7 @@ class Config:
     worktree_dir: str = "../worktrees"
     mcps: MCPConfig = field(default_factory=MCPConfig)
     project: ProjectConfig = field(default_factory=ProjectConfig)
+    workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
 
     # Runtime settings (not persisted)
     project_root: Optional[Path] = None
@@ -189,6 +208,17 @@ def load_config(project_root: Optional[Path] = None) -> Config:
             agent_instructions=project_data.get("agent_instructions"),
         )
 
+    # Parse workflow config
+    if "workflow" in data:
+        workflow_data = data["workflow"]
+        config.workflow = WorkflowConfig(
+            mode=workflow_data.get("mode", "review"),
+            stop_after_generate=workflow_data.get("stop_after_generate", True),
+            stop_after_run=workflow_data.get("stop_after_run", False),
+            auto_approve=workflow_data.get("auto_approve", False),
+            auto_pr=workflow_data.get("auto_pr", True),
+        )
+
     return config
 
 
@@ -242,6 +272,21 @@ def save_config(config: Config, project_root: Optional[Path] = None) -> None:
         if config.project.agent_instructions:
             project_data["agent_instructions"] = config.project.agent_instructions
         data["project"] = project_data
+
+    # Workflow config (only save non-default values)
+    workflow_data: dict[str, Any] = {}
+    if config.workflow.mode != "review":
+        workflow_data["mode"] = config.workflow.mode
+    if not config.workflow.stop_after_generate:
+        workflow_data["stop_after_generate"] = config.workflow.stop_after_generate
+    if config.workflow.stop_after_run:
+        workflow_data["stop_after_run"] = config.workflow.stop_after_run
+    if config.workflow.auto_approve:
+        workflow_data["auto_approve"] = config.workflow.auto_approve
+    if not config.workflow.auto_pr:
+        workflow_data["auto_pr"] = config.workflow.auto_pr
+    if workflow_data:
+        data["workflow"] = workflow_data
 
     with open(config_path, "w") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
