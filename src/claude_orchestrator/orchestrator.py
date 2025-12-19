@@ -359,14 +359,29 @@ def _format_json_event_for_log(event: dict) -> str:
         return "\n".join(lines) + "\n" if lines else ""
 
     elif event_type == "user":
-        # Tool result
+        # Tool result - check both locations where content might be
+        result_text = ""
+
+        # First check tool_use_result.stdout (for Bash and similar tools)
         tool_result = event.get("tool_use_result", {})
         if tool_result:
-            stdout = tool_result.get("stdout", "")
-            if stdout and len(stdout) > 200:
-                stdout = stdout[:200] + "..."
-            if stdout:
-                return f"[RESULT] {stdout}\n"
+            result_text = tool_result.get("stdout", "")
+
+        # Also check message.content for MCP results
+        if not result_text:
+            content_list = event.get("message", {}).get("content", [])
+            for item in content_list:
+                if item.get("type") == "tool_result":
+                    content = item.get("content", "")
+                    if isinstance(content, str) and content:
+                        result_text = content
+                        break
+
+        # Truncate long results to avoid log bloat
+        if result_text:
+            if len(result_text) > 500:
+                result_text = result_text[:500] + f"... [{len(result_text)} chars total]"
+            return f"[RESULT] {result_text}\n"
         return ""
 
     elif event_type == "result":

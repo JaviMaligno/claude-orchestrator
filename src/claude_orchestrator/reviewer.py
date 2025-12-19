@@ -292,10 +292,22 @@ def build_reviewer_prompt(
     """
     # Test section - use test_instructions if available
     if config.project.test_instructions:
-        test_section = f"## Testing\n{config.project.test_instructions}"
+        test_section = f"""## Testing (MANDATORY)
+
+**You MUST run this exact test command:**
+```bash
+{config.project.test_instructions}
+```
+
+⚠️ DO NOT approve the PR without running this specific test command.
+Include the test output in your review comment."""
     elif config.project.test_command:
-        test_section = f"""## Testing
-Run tests: {config.project.test_command}
+        test_section = f"""## Testing (MANDATORY)
+
+**Run this test command:**
+```bash
+{config.project.test_command}
+```
 All tests must pass before approving."""
     else:
         test_section = """## Testing
