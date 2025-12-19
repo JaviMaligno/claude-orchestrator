@@ -374,14 +374,27 @@ You have two options for tool configuration:
 
 ## Agent Timeouts & Retry
 
-Agents can get stuck or hang. The orchestrator monitors agent activity and can automatically retry with session resume.
+Agents can get stuck or hang. The orchestrator monitors agent activity in real-time and can automatically retry with session resume.
 
 ### How It Works
 
-1. **Activity Monitoring**: Checks if the log file is growing (agent is producing output)
-2. **Inactivity Timeout**: If no output for N seconds, terminate the agent
-3. **Retry with Resume**: Use `claude --resume <session_id>` to continue from where it left off
-4. **Max Runtime**: Hard limit on total agent execution time
+1. **Real-time Streaming**: Uses `claude --output-format stream-json` to receive events in real-time
+2. **Activity Monitoring**: Each JSON event resets the inactivity timer (tool calls, text output, etc.)
+3. **Inactivity Timeout**: If no events for N seconds, the agent is considered stuck
+4. **Retry with Resume**: Use `claude --resume <session_id>` to continue from where it left off
+5. **Max Runtime**: Hard limit on total agent execution time
+
+### Log Format
+
+The orchestrator converts JSON events to human-readable logs:
+
+```
+[INIT] Session: 8b05f910... Model: claude-opus-4-5-20251101
+I'll help you with this task...
+[TOOL] Bash: git status
+[RESULT] On branch feature/my-task...
+[COMPLETE] Duration: 45.2s
+```
 
 ### Configuration
 
