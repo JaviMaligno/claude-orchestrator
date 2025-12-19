@@ -445,11 +445,13 @@ def _format_json_event_for_log(event: dict) -> str:
     elif event_type == "user":
         # Tool result - check both locations where content might be
         result_text = ""
+        tool_name = ""
 
         # First check tool_use_result.stdout (for Bash and similar tools)
         tool_result = event.get("tool_use_result", {})
         if tool_result:
             result_text = tool_result.get("stdout", "")
+            tool_name = tool_result.get("tool_name", "")
 
         # Also check message.content for MCP results
         if not result_text:
@@ -461,10 +463,16 @@ def _format_json_event_for_log(event: dict) -> str:
                         result_text = content
                         break
 
-        # Truncate long results to avoid log bloat
+        # Format result with size info for large responses
         if result_text:
-            if len(result_text) > 500:
-                result_text = result_text[:500] + f"... [{len(result_text)} chars total]"
+            result_len = len(result_text)
+            if result_len > 1000:
+                # For very large results (like PR diffs), show summary
+                preview = result_text[:200].replace("\n", " ")
+                tool_info = f" from {tool_name}" if tool_name else ""
+                return f"[RESULT{tool_info}] ({result_len:,} chars) {preview}...\n"
+            elif result_len > 500:
+                result_text = result_text[:500] + f"... [{result_len} chars]"
             return f"[RESULT] {result_text}\n"
         return ""
 
@@ -500,29 +508,59 @@ async def _stream_and_monitor(
     """
     start_time = time.time()
     last_activity_time = start_time
+    last_bytes_time = start_time  # Track when we last received ANY bytes
     event_count = 0
+    bytes_received = 0
     session_id: str | None = None
     line_buffer = b""
+    process_done = asyncio.Event()
 
     async def read_and_process():
         """Read JSON lines from subprocess and convert to human-readable log."""
-        nonlocal last_activity_time, event_count, session_id, line_buffer
+        nonlocal \
+            last_activity_time, \
+            last_bytes_time, \
+            event_count, \
+            session_id, \
+            line_buffer, \
+            bytes_received
 
         with open(log_file, "w") as f:
             while True:
                 try:
-                    # Read chunks with timeout
-                    chunk = await asyncio.wait_for(process.stdout.read(4096), timeout=2.0)
-                    if not chunk:
-                        break  # EOF
+                    # Check if process has ended
+                    if process.returncode is not None:
+                        # Process any remaining buffer
+                        if line_buffer:
+                            try:
+                                event = json.loads(line_buffer.decode())
+                                readable = _format_json_event_for_log(event)
+                                if readable:
+                                    f.write(readable)
+                                    f.flush()
+                            except (json.JSONDecodeError, UnicodeDecodeError):
+                                f.write(line_buffer.decode(errors="replace") + "\n")
+                                f.flush()
+                        break
 
-                    # Update activity time
-                    last_activity_time = time.time()
+                    # Read chunks with short timeout to check process status frequently
+                    chunk = await asyncio.wait_for(process.stdout.read(4096), timeout=1.0)
+                    if not chunk:
+                        # EOF - process finished
+                        break
+
+                    # Update activity times - receiving ANY bytes counts as activity
+                    now = time.time()
+                    last_bytes_time = now
+                    bytes_received += len(chunk)
 
                     # Add to buffer and process complete lines
                     line_buffer += chunk
                     while b"\n" in line_buffer:
                         line, line_buffer = line_buffer.split(b"\n", 1)
+                        # We got a complete JSON event - this is real activity
+                        last_activity_time = now
+
                         try:
                             event = json.loads(line.decode())
                             event_count += 1
@@ -539,21 +577,33 @@ async def _stream_and_monitor(
 
                         except json.JSONDecodeError:
                             # Not valid JSON, write raw
-                            f.write(line.decode() + "\n")
+                            f.write(line.decode(errors="replace") + "\n")
                             f.flush()
 
                 except TimeoutError:
+                    # Timeout on read - check if process is still running
                     if process.returncode is not None:
                         break
                     continue
-                except Exception:
+                except Exception as e:
+                    # Log unexpected errors
+                    f.write(f"\n[ERROR] Stream read error: {e}\n")
+                    f.flush()
                     break
+
+        process_done.set()
 
     async def monitor_timeouts():
         """Monitor for inactivity and max runtime timeouts."""
         last_reported_minute = 0
-        while process.returncode is None:
+        last_reported_bytes = 0
+
+        while not process_done.is_set():
             await asyncio.sleep(5)
+
+            # Check if process has terminated
+            if process.returncode is not None:
+                return None
 
             current_time = time.time()
             elapsed = current_time - start_time
@@ -565,19 +615,36 @@ async def _stream_and_monitor(
                 )
                 return "max_runtime"
 
-            # Check inactivity timeout
+            # For inactivity, we check both:
+            # 1. Time since last complete JSON event (real activity)
+            # 2. Time since we received ANY bytes (data still flowing)
             inactivity_duration = current_time - last_activity_time
-            if inactivity_duration > agent_config.inactivity_timeout:
+            bytes_stalled_duration = current_time - last_bytes_time
+
+            # If no bytes at all for inactivity_timeout, agent is truly stuck
+            if bytes_stalled_duration > agent_config.inactivity_timeout:
                 print(
-                    f"[{task_id}] No activity for {int(inactivity_duration)}s ({event_count} events total), terminating..."
+                    f"[{task_id}] No data received for {int(bytes_stalled_duration)}s ({event_count} events, {bytes_received} bytes total), terminating..."
                 )
                 return "inactivity"
 
-            # Log progress every minute
+            # Log progress every minute, or when we're receiving data but no complete events
             current_minute = int(elapsed) // 60
-            if current_minute > last_reported_minute:
+            if current_minute > last_reported_minute or (
+                bytes_received > last_reported_bytes + 10000  # Every 10KB
+            ):
                 last_reported_minute = current_minute
-                print(f"[{task_id}] Running for {int(elapsed)}s, {event_count} events received...")
+                last_reported_bytes = bytes_received
+
+                # Show different message if we're receiving data but no complete events
+                if bytes_received > 0 and inactivity_duration > 30:
+                    print(
+                        f"[{task_id}] Running {int(elapsed)}s: {event_count} events, {bytes_received} bytes (receiving large response...)"
+                    )
+                else:
+                    print(
+                        f"[{task_id}] Running {int(elapsed)}s: {event_count} events, {bytes_received} bytes"
+                    )
 
         return None
 
@@ -613,7 +680,11 @@ async def _stream_and_monitor(
             await monitor_task
         except asyncio.CancelledError:
             pass
-        await process.wait()
+        # Wait for process to fully terminate
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except TimeoutError:
+            pass
 
     for task in pending:
         task.cancel()
@@ -624,6 +695,11 @@ async def _stream_and_monitor(
 
     elapsed = time.time() - start_time
     log_content = log_file.read_text() if log_file.exists() else ""
+
+    # Final status log
+    print(
+        f"[{task_id}] Completed in {elapsed:.1f}s: {event_count} events, {bytes_received} bytes, exit={process.returncode}"
+    )
 
     return AgentRunResult(
         success=process.returncode == 0 if timeout_type is None else False,
