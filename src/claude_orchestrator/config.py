@@ -13,6 +13,7 @@ from typing import Any
 
 import yaml
 
+from claude_orchestrator.git_provider import get_default_branch, parse_remote_url
 from claude_orchestrator.mcp_registry import AuthType, register_custom_mcp
 
 CONFIG_FILENAME = ".claude-orchestrator.yaml"
@@ -245,6 +246,26 @@ def load_config(project_root: Path | None = None) -> Config:
             owner=git_data.get("owner"),
             repo=git_data.get("repo"),
         )
+
+    # Auto-detect repo_slug and owner/repo from git remote if not configured
+    if not config.git.repo_slug or not config.git.owner:
+        repo_info = parse_remote_url(str(project_root))
+        if repo_info:
+            if not config.git.repo_slug:
+                config.git.repo_slug = repo_info.get("repo")
+            if not config.git.owner:
+                config.git.owner = repo_info.get("owner")
+            if not config.git.repo:
+                config.git.repo = repo_info.get("repo")
+
+    # Auto-detect base_branch from remote if using default "main"
+    if config.git.base_branch == "main":
+        detected_branch = get_default_branch(str(project_root))
+        if detected_branch and detected_branch != "main":
+            config.git.base_branch = detected_branch
+            # Also update destination_branch if it was the same
+            if config.git.destination_branch == "main":
+                config.git.destination_branch = detected_branch
 
     # Parse worktree_dir
     if "worktree_dir" in data:
