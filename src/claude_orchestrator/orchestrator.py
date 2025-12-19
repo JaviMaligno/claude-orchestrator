@@ -52,6 +52,7 @@ class TaskResult:
     branch: str
     worktree_path: Path | None = None
     pr_url: str | None = None
+    pr_id: int | None = None  # PR number/ID for use in review phase
     error: str | None = None
     attempts: int = 0
     session_id: str | None = None
@@ -168,8 +169,20 @@ def build_agent_prompt(
         else "- Determine based on task"
     )
 
-    # Test info
-    test_info = task.test_command or "Manual verification - document steps in commit message"
+    # Test section - use test_instructions if available, fallback to test_command
+    if config and config.project.test_instructions:
+        # Use detailed test instructions from config
+        test_section = f"## Testing\n{config.project.test_instructions}"
+    else:
+        # Fallback to simple test command (config > task > manual)
+        test_command = (
+            (config.project.test_command if config else None)
+            or task.test_command
+            or "Manual verification - document steps in commit message"
+        )
+        test_section = f"""## Testing
+Run tests before committing: {test_command}
+Only commit if tests pass."""
 
     # Agent instructions path
     agent_instructions = ""
@@ -208,8 +221,7 @@ def build_agent_prompt(
 3. Add tests if applicable
 4. Only modify files within scope
 
-## Testing
-{test_info}
+{test_section}
 
 ## When Complete
 Create a commit with a descriptive message following project conventions.
@@ -300,22 +312,50 @@ def _format_json_event_for_log(event: dict) -> str:
         model = event.get("model", "unknown")
         return f"[INIT] Session: {session_id[:8]}... Model: {model}\n"
 
+    elif event_type == "stream_event":
+        # Handle streaming events - extract partial content
+        inner_event = event.get("event", {})
+        inner_type = inner_event.get("type", "")
+
+        if inner_type == "content_block_delta":
+            delta = inner_event.get("delta", {})
+            delta_type = delta.get("type", "")
+
+            if delta_type == "text_delta":
+                # Streaming text output - return immediately for real-time display
+                return delta.get("text", "")
+            # Skip input_json_delta - tool input being built
+            return ""
+
+        elif inner_type == "content_block_stop":
+            return "\n"
+
+        elif inner_type == "message_stop":
+            return "\n---\n"
+
+        # Skip other stream events
+        return ""
+
     elif event_type == "assistant":
+        # Use assistant events for tool info (has complete input)
         msg = event.get("message", {})
         content = msg.get("content", [])
         lines = []
         for item in content:
-            if item.get("type") == "text":
-                lines.append(item.get("text", ""))
-            elif item.get("type") == "tool_use":
+            if item.get("type") == "tool_use":
                 tool_name = item.get("name", "unknown")
                 tool_input = item.get("input", {})
                 if "command" in tool_input:
-                    lines.append(f"[TOOL] {tool_name}: {tool_input['command']}")
-                elif "description" in tool_input:
-                    lines.append(f"[TOOL] {tool_name}: {tool_input['description']}")
+                    cmd = tool_input["command"]
+                    if len(cmd) > 100:
+                        cmd = cmd[:100] + "..."
+                    lines.append(f"[TOOL] {tool_name}: {cmd}")
+                elif "file_path" in tool_input or "path" in tool_input:
+                    path = tool_input.get("file_path") or tool_input.get("path", "")
+                    lines.append(f"[TOOL] {tool_name}: {path}")
                 else:
                     lines.append(f"[TOOL] {tool_name}")
+            # Skip text - already shown via stream_event
         return "\n".join(lines) + "\n" if lines else ""
 
     elif event_type == "user":
@@ -528,7 +568,17 @@ async def run_agent(
 
     # Use stream-json for real-time monitoring in auto-approve mode
     if auto_approve:
-        cmd.extend(["--print", "--output-format", "stream-json", "--verbose", "-p", prompt])
+        cmd.extend(
+            [
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--include-partial-messages",
+                "--verbose",
+                "-p",
+                prompt,
+            ]
+        )
     else:
         cmd.extend(["--print", "--verbose", "-p", prompt])
 
@@ -618,7 +668,15 @@ async def run_agent_with_resume(
     # Use stream-json for real-time monitoring in auto-approve mode
     if auto_approve:
         cmd.extend(
-            ["--resume", session_id, "--print", "--output-format", "stream-json", "--verbose"]
+            [
+                "--resume",
+                session_id,
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--include-partial-messages",
+                "--verbose",
+            ]
         )
     else:
         cmd.extend(["--resume", session_id, "--print", "--verbose"])
@@ -870,6 +928,7 @@ def save_state(results: list[TaskResult], state_file: Path) -> None:
                 "status": r.status,
                 "branch": r.branch,
                 "pr_url": r.pr_url,
+                "pr_id": r.pr_id,
                 "error": r.error,
                 "attempts": r.attempts,
                 "session_id": r.session_id,

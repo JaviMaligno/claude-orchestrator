@@ -1,7 +1,5 @@
 """Tests for git_provider module."""
 
-import pytest
-
 from claude_orchestrator.git_provider import (
     GitProvider,
     detect_provider,
@@ -25,4 +23,3 @@ class TestParseRemoteUrl:
         """Test parsing in a non-git directory."""
         result = parse_remote_url(str(tmp_path))
         assert result is None
-

@@ -30,6 +30,14 @@ from claude_orchestrator.git_provider import (
 )
 from claude_orchestrator.mcp_registry import AuthType, get_mcp_status
 from claude_orchestrator.orchestrator import run_tasks_sync
+from claude_orchestrator.reviewer import (
+    PRInfo,
+    ReviewResult,
+    fetch_open_prs,
+    fetch_pr_by_id,
+    load_prs_from_state,
+    review_prs_sync,
+)
 from claude_orchestrator.task_generator import (
     generate_tasks_sync,
     load_tasks_config,
@@ -357,6 +365,11 @@ def run(
         "--yolo",
         help="YOLO mode: generate, execute, and create PRs without stopping.",
     ),
+    with_review: bool = typer.Option(
+        False,
+        "--with-review",
+        help="Run PR review phase after task execution.",
+    ),
     tasks: str | None = typer.Option(
         None,
         "--tasks",
@@ -405,6 +418,7 @@ def run(
       - Default: Generate tasks, stop for review
       - --execute: Generate and execute, stop before PRs
       - --yolo: Generate, execute, and create PRs without stopping
+      - --with-review: Execute + run PR review phase afterwards
     """
     # Load project config early for workflow settings
     config = load_config(project_dir)
@@ -485,8 +499,54 @@ def run(
         sequential=sequential,
     )
 
-    # Exit with appropriate code
+    # Check for failures
     failed = sum(1 for r in results if r.status == "failed")
+    successful = [r for r in results if r.status == "success"]
+
+    # Handle --with-review flag
+    if with_review and successful and not dry_run:
+        console.print("\n" + "=" * 60)
+        console.print("[bold]PR REVIEW PHASE[/bold]")
+        console.print("=" * 60 + "\n")
+
+        # Load PRs from successful results
+        state_file = project_dir / ".claude-orchestrator" / ".state.json"
+        prs_to_review = load_prs_from_state(state_file)
+
+        if prs_to_review:
+            # Fetch full PR info
+            provider_status = get_provider_status(str(project_dir))
+            full_prs = []
+            for pr in prs_to_review:
+                full_pr = fetch_pr_by_id(
+                    provider_status,
+                    project_dir,
+                    pr.id,
+                    config.git.repo_slug,
+                )
+                if full_pr:
+                    full_prs.append(full_pr)
+
+            if full_prs:
+                console.print(f"Reviewing {len(full_prs)} PR(s)...")
+                review_results = review_prs_sync(
+                    prs=full_prs,
+                    repo_root=project_dir,
+                    config=config,
+                    automerge=config.review.automerge,
+                    auto_approve=auto_approve,
+                    sequential=True,
+                )
+                _print_review_summary(review_results)
+
+                review_failed = sum(1 for r in review_results if r.status == "failed")
+                failed += review_failed
+            else:
+                console.print("[yellow]Could not fetch PR details for review[/yellow]")
+        else:
+            console.print("[yellow]No PRs found from task execution[/yellow]")
+
+    # Exit with appropriate code
     raise typer.Exit(1 if failed > 0 else 0)
 
 
@@ -679,9 +739,16 @@ def config(
         if cfg.mcps.enabled:
             console.print("[dim]# MCPs[/dim]")
             console.print(f"  mcps.enabled: {', '.join(cfg.mcps.enabled)}")
-        if cfg.project.test_command:
+        if cfg.project.test_command or cfg.project.test_instructions:
             console.print("[dim]# Project[/dim]")
-            console.print(f"  project.test_command: {cfg.project.test_command}")
+            if cfg.project.test_command:
+                console.print(f"  project.test_command: {cfg.project.test_command}")
+            if cfg.project.test_instructions:
+                preview = cfg.project.test_instructions[:50].replace("\n", " ")
+                console.print(f"  project.test_instructions: {preview}...")
+        console.print("[dim]# Review[/dim]")
+        console.print(f"  review.automerge: {cfg.review.automerge}")
+        console.print(f"  review.test_before_merge: {cfg.review.test_before_merge}")
         console.print("[dim]# Agent Timeouts & Retry[/dim]")
         console.print(f"  agent.inactivity_timeout: {cfg.agent.inactivity_timeout}")
         console.print(f"  agent.max_runtime: {cfg.agent.max_runtime}")
@@ -711,6 +778,14 @@ def config(
             console.print(cfg.worktree_dir)
         elif key == "project.test_command":
             console.print(cfg.project.test_command or "")
+        elif key == "project.test_instructions":
+            console.print(cfg.project.test_instructions or "")
+        elif key == "review.automerge":
+            console.print(str(cfg.review.automerge).lower())
+        elif key == "review.test_before_merge":
+            console.print(str(cfg.review.test_before_merge).lower())
+        elif key == "review.require_all_tests_pass":
+            console.print(str(cfg.review.require_all_tests_pass).lower())
         elif key == "workflow.mode":
             console.print(cfg.workflow.mode)
         elif key == "workflow.stop_after_generate":
@@ -758,6 +833,23 @@ def config(
         cfg.worktree_dir = value
     elif key == "project.test_command":
         cfg.project.test_command = value
+    elif key == "project.test_instructions":
+        # Allow multiline - read from file if starts with @
+        if value.startswith("@"):
+            filepath = Path(value[1:])
+            if filepath.exists():
+                cfg.project.test_instructions = filepath.read_text()
+            else:
+                console.print(f"[red]File not found: {filepath}[/red]")
+                raise typer.Exit(1)
+        else:
+            cfg.project.test_instructions = value
+    elif key == "review.automerge":
+        cfg.review.automerge = value.lower() in ("true", "1", "yes")
+    elif key == "review.test_before_merge":
+        cfg.review.test_before_merge = value.lower() in ("true", "1", "yes")
+    elif key == "review.require_all_tests_pass":
+        cfg.review.require_all_tests_pass = value.lower() in ("true", "1", "yes")
     elif key.startswith("mcps.enabled"):
         cfg.mcps.enabled = [v.strip() for v in value.split(",")]
     elif key == "workflow.mode":
@@ -906,6 +998,249 @@ def status(
         )
 
     console.print(table)
+
+
+def _select_prs_interactive(prs: list[PRInfo]) -> list[PRInfo]:
+    """Interactive PR selector using Rich.
+
+    Args:
+        prs: List of available PRs
+
+    Returns:
+        List of selected PRs
+    """
+    from rich.prompt import Prompt
+
+    if not prs:
+        console.print("[yellow]No open PRs found[/yellow]")
+        return []
+
+    console.print("\n[bold]Available Pull Requests:[/bold]\n")
+
+    # Display PRs in a table
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("#", style="dim")
+    table.add_column("ID")
+    table.add_column("Title")
+    table.add_column("Branch")
+    table.add_column("Author")
+
+    for i, pr in enumerate(prs, 1):
+        table.add_row(
+            str(i),
+            str(pr.id),
+            pr.title[:50] + "..." if len(pr.title) > 50 else pr.title,
+            pr.source_branch,
+            pr.author or "Unknown",
+        )
+
+    console.print(table)
+    console.print()
+
+    # Get selection
+    selection = Prompt.ask(
+        "Select PRs to review (comma-separated numbers, 'all', or 'q' to quit)",
+        default="all",
+    )
+
+    if selection.lower() == "q":
+        return []
+
+    if selection.lower() == "all":
+        return prs
+
+    # Parse selection
+    try:
+        indices = [int(x.strip()) - 1 for x in selection.split(",")]
+        selected = [prs[i] for i in indices if 0 <= i < len(prs)]
+        return selected
+    except (ValueError, IndexError):
+        console.print("[red]Invalid selection[/red]")
+        return []
+
+
+def _print_review_summary(results: list[ReviewResult]) -> None:
+    """Print review summary.
+
+    Args:
+        results: List of review results
+    """
+    console.print("\n" + "=" * 60)
+    console.print("[bold]REVIEW SUMMARY[/bold]")
+    console.print("=" * 60)
+
+    for result in results:
+        status_emoji = {
+            "approved": "[green]✓[/green]",
+            "merged": "[green]✓✓[/green]",
+            "changes_requested": "[yellow]![/yellow]",
+            "failed": "[red]✗[/red]",
+        }.get(result.status, "?")
+
+        console.print(f"\n{status_emoji} PR #{result.pr_id}")
+        console.print(f"  Status: {result.status}")
+        console.print(f"  URL: {result.pr_url}")
+        if result.error:
+            console.print(f"  Error: {result.error}")
+        if result.session_id and result.status == "failed":
+            console.print(f"  Session ID (for manual resume): {result.session_id}")
+
+    approved = sum(1 for r in results if r.status in ("approved", "merged"))
+    failed = sum(1 for r in results if r.status == "failed")
+
+    console.print(f"\n{approved}/{len(results)} PRs reviewed successfully")
+    if failed > 0:
+        console.print(f"[red]{failed} PR(s) failed review[/red]")
+
+
+@app.command()
+def review(
+    pr_id: int | None = typer.Option(
+        None,
+        "--pr",
+        "-p",
+        help="Review a specific PR by ID.",
+    ),
+    from_run: bool = typer.Option(
+        False,
+        "--from-run",
+        "-r",
+        help="Review PRs from the last run (uses .state.json).",
+    ),
+    automerge: bool = typer.Option(
+        False,
+        "--automerge",
+        "-m",
+        help="Automatically merge PRs after successful review.",
+    ),
+    auto_approve: bool = typer.Option(
+        False,
+        "--auto-approve",
+        "-y",
+        help="Automatically approve all agent plans.",
+    ),
+    sequential: bool = typer.Option(
+        True,
+        "--sequential/--parallel",
+        help="Run reviews sequentially (default) or in parallel.",
+    ),
+    project_dir: Path = typer.Option(
+        Path.cwd(),
+        "--project-dir",
+        "-d",
+        help="Project directory.",
+    ),
+):
+    """Review and test pull requests using Claude Code agents.
+
+    Modes:
+      - Interactive (default): List open PRs and select which to review
+      - --pr ID: Review a specific PR by ID
+      - --from-run: Review PRs created in the last orchestrator run
+
+    The review agent will:
+      1. Checkout the PR branch
+      2. Review code changes
+      3. Run tests (using project.test_instructions if configured)
+      4. Fix issues if found
+      5. Approve or request changes
+
+    Examples:
+        claude-orchestrator review              # Interactive selection
+        claude-orchestrator review --pr 42     # Review PR #42
+        claude-orchestrator review --from-run  # Review PRs from last run
+        claude-orchestrator review --automerge # Auto-merge after review
+    """
+    config = load_config(project_dir)
+    provider_status = get_provider_status(str(project_dir))
+
+    if not provider_status.is_ready:
+        console.print(f"[red]Error: Git provider not ready: {provider_status.error}[/red]")
+        raise typer.Exit(1)
+
+    # Apply config defaults
+    automerge = automerge or config.review.automerge
+    auto_approve = auto_approve or config.workflow.auto_approve
+
+    prs_to_review: list[PRInfo] = []
+
+    # Mode 1: Specific PR
+    if pr_id is not None:
+        console.print(f"[bold]Fetching PR #{pr_id}...[/bold]")
+        pr = fetch_pr_by_id(
+            provider_status,
+            project_dir,
+            pr_id,
+            config.git.repo_slug,
+        )
+        if not pr:
+            console.print(f"[red]Error: PR #{pr_id} not found[/red]")
+            raise typer.Exit(1)
+        prs_to_review = [pr]
+
+    # Mode 2: From last run
+    elif from_run:
+        console.print("[bold]Loading PRs from last run...[/bold]")
+        state_file = project_dir / ".claude-orchestrator" / ".state.json"
+        prs_to_review = load_prs_from_state(state_file)
+        if not prs_to_review:
+            console.print("[yellow]No PRs found from last run[/yellow]")
+            raise typer.Exit()
+
+        # Fetch full PR info
+        full_prs = []
+        for pr in prs_to_review:
+            full_pr = fetch_pr_by_id(
+                provider_status,
+                project_dir,
+                pr.id,
+                config.git.repo_slug,
+            )
+            if full_pr:
+                full_prs.append(full_pr)
+        prs_to_review = full_prs
+
+    # Mode 3: Interactive selection
+    else:
+        console.print("[bold]Fetching open PRs...[/bold]")
+        all_prs = fetch_open_prs(
+            provider_status,
+            project_dir,
+            config.git.repo_slug,
+        )
+        prs_to_review = _select_prs_interactive(all_prs)
+
+    if not prs_to_review:
+        console.print("[yellow]No PRs selected for review[/yellow]")
+        raise typer.Exit()
+
+    # Confirm review
+    console.print(f"\n[bold]Reviewing {len(prs_to_review)} PR(s):[/bold]")
+    for pr in prs_to_review:
+        console.print(f"  - #{pr.id}: {pr.title}")
+
+    if automerge:
+        console.print(
+            "\n[yellow]⚠ Automerge enabled - PRs will be merged after successful review[/yellow]"
+        )
+
+    # Run reviews
+    console.print("\n[bold]Starting review...[/bold]\n")
+    results = review_prs_sync(
+        prs=prs_to_review,
+        repo_root=project_dir,
+        config=config,
+        automerge=automerge,
+        auto_approve=auto_approve,
+        sequential=sequential,
+    )
+
+    # Print summary
+    _print_review_summary(results)
+
+    # Exit code
+    failed = sum(1 for r in results if r.status == "failed")
+    raise typer.Exit(1 if failed > 0 else 0)
 
 
 if __name__ == "__main__":

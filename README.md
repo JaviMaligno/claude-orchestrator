@@ -254,6 +254,42 @@ claude-orchestrator yolo TODO.md
 claude-orchestrator run --from-todo TODO.md --yolo
 ```
 
+### `review`
+
+Review and test pull requests using Claude Code agents:
+
+```bash
+# Interactive: list open PRs and select
+claude-orchestrator review
+
+# Review specific PR
+claude-orchestrator review --pr 42
+
+# Review PRs from last run
+claude-orchestrator review --from-run
+
+# Auto-merge after successful review
+claude-orchestrator review --automerge --auto-approve
+```
+
+**Note for Bitbucket repositories**: The `review` command needs to fetch PRs directly via the Bitbucket API (agents use the MCP). Set these environment variables:
+
+```bash
+export BITBUCKET_WORKSPACE=your-workspace
+export BITBUCKET_EMAIL=your-email@example.com
+export BITBUCKET_API_TOKEN=your-app-password
+```
+
+You can get an App Password from [Bitbucket Settings](https://bitbucket.org/account/settings/app-passwords/).
+
+### `status`
+
+Show status of previous run:
+
+```bash
+claude-orchestrator status
+```
+
 ## Workflow Modes
 
 Configure how much the orchestrator stops for review:
@@ -452,6 +488,102 @@ If a task times out after all retries, you can manually resume:
 ```bash
 cd path/to/worktree
 claude --resume abc123-def456
+```
+
+## Custom Testing Instructions
+
+For projects with complex testing requirements, you can provide detailed testing instructions:
+
+### Configuration
+
+```yaml
+# .claude-orchestrator.yaml
+project:
+  test_command: "pytest tests/unit/"  # Quick command fallback
+  
+  # Detailed instructions (overrides test_command in prompts)
+  test_instructions: |
+    ## Testing Requirements
+    
+    1. Run unit tests first:
+       ```bash
+       pytest tests/unit/ -v
+       ```
+    
+    2. For final validation, run the full pipeline test:
+       ```bash
+       python scripts/test_full_pipeline.py
+       ```
+       
+       **Important**: This test can take up to 15 minutes to complete.
+       Monitor the status output and check logs to verify everything works.
+    
+    3. Only commit if all tests pass.
+```
+
+When `test_instructions` is provided, it completely replaces the simple "run this command" instruction with your detailed markdown instructions.
+
+## PR Review Phase
+
+After tasks complete and create PRs, you can have Claude agents review, test, and fix them:
+
+### Review Commands
+
+```bash
+# Interactive: list open PRs and select which to review
+claude-orchestrator review
+
+# Review a specific PR by ID
+claude-orchestrator review --pr 42
+
+# Review PRs from the last orchestrator run
+claude-orchestrator review --from-run
+
+# Auto-merge PRs after successful review
+claude-orchestrator review --automerge
+
+# Combine with task execution
+claude-orchestrator run --from-todo todo.md --with-review
+```
+
+### Review Configuration
+
+```yaml
+# .claude-orchestrator.yaml
+review:
+  automerge: false              # Merge PRs after successful review
+  test_before_merge: true       # Run tests before approving
+  require_all_tests_pass: true  # All tests must pass
+  
+  # Optional: different tool permissions for reviewers
+  tools:
+    permission_mode: acceptEdits
+    allowed_cli:
+      - gh
+```
+
+### Review Workflow
+
+1. **Checkout**: Agent checks out the PR branch
+2. **Code Review**: Reviews changes for correctness and conventions
+3. **Testing**: Runs tests using `test_instructions` (if configured)
+4. **Fix Issues**: If issues found, fixes and commits them
+5. **Approve/Merge**: Approves the PR or merges (if automerge enabled)
+
+### Interactive PR Selection
+
+When running `claude-orchestrator review` without arguments:
+
+```
+Available Pull Requests:
+
+# │ ID │ Title                     │ Branch            │ Author
+──┼────┼───────────────────────────┼───────────────────┼─────────
+1 │ 42 │ feat: add user auth       │ feature/user-auth │ alice
+2 │ 43 │ fix: database connection  │ fix/db-conn       │ bob
+3 │ 44 │ docs: update readme       │ docs/readme       │ charlie
+
+Select PRs to review (comma-separated numbers, 'all', or 'q' to quit): 1,2
 ```
 
 ## Optional MCPs

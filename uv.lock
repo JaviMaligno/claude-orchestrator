@@ -54,10 +54,11 @@ wheels = [
 
 [[package]]
 name = "claude-code-orchestrator"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
+    { name = "httpx" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
@@ -81,6 +82,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.75.0" },
     { name = "anthropic", marker = "extra == 'dev'", specifier = ">=0.40" },
     { name = "anthropic", marker = "extra == 'sdk'", specifier = ">=0.40" },
+    { name = "httpx", specifier = ">=0.24.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21" },

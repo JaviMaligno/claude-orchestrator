@@ -105,11 +105,31 @@ class MCPConfig:
 
 
 @dataclass
+class ReviewConfig:
+    """PR review phase configuration."""
+
+    # Automatically merge PRs after successful review
+    automerge: bool = False
+
+    # Run tests before approving/merging
+    test_before_merge: bool = True
+
+    # Require all tests to pass before merge
+    require_all_tests_pass: bool = True
+
+    # Inherit tools config from main tools section (if None, uses same tools)
+    tools: ToolsConfig | None = None
+
+
+@dataclass
 class ProjectConfig:
     """Project context configuration."""
 
     key_files: list[str] = field(default_factory=list)
     test_command: str | None = None
+    # Detailed testing instructions in markdown format
+    # When provided, overrides test_command in agent prompts
+    test_instructions: str | None = None
     agent_instructions: str | None = None
 
 
@@ -124,6 +144,7 @@ class Config:
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    review: ReviewConfig = field(default_factory=ReviewConfig)
 
     # Runtime settings (not persisted)
     project_root: Path | None = None
@@ -253,6 +274,7 @@ def load_config(project_root: Path | None = None) -> Config:
         config.project = ProjectConfig(
             key_files=project_data.get("key_files", []),
             test_command=project_data.get("test_command"),
+            test_instructions=project_data.get("test_instructions"),
             agent_instructions=project_data.get("agent_instructions"),
         )
 
@@ -288,6 +310,27 @@ def load_config(project_root: Path | None = None) -> Config:
             max_retries=agent_data.get("max_retries", 2),
             use_resume=agent_data.get("use_resume", True),
             retry_delay=agent_data.get("retry_delay", 5),
+        )
+
+    # Parse review config
+    if "review" in data:
+        review_data = data["review"]
+        review_tools = None
+        if "tools" in review_data and review_data["tools"]:
+            tools_data = review_data["tools"]
+            review_tools = ToolsConfig(
+                permission_mode=tools_data.get("permission_mode", "default"),
+                allowed_cli=tools_data.get("allowed_cli", []),
+                allowed_tools=tools_data.get("allowed_tools", []),
+                disallowed_tools=tools_data.get("disallowed_tools", []),
+                add_dirs=tools_data.get("add_dirs", []),
+                skip_permissions=tools_data.get("skip_permissions", False),
+            )
+        config.review = ReviewConfig(
+            automerge=review_data.get("automerge", False),
+            test_before_merge=review_data.get("test_before_merge", True),
+            require_all_tests_pass=review_data.get("require_all_tests_pass", True),
+            tools=review_tools,
         )
 
     return config
@@ -334,12 +377,19 @@ def save_config(config: Config, project_root: Path | None = None) -> None:
         data["mcps"] = mcps_data
 
     # Project config
-    if config.project.key_files or config.project.test_command or config.project.agent_instructions:
+    if (
+        config.project.key_files
+        or config.project.test_command
+        or config.project.test_instructions
+        or config.project.agent_instructions
+    ):
         project_data: dict[str, Any] = {}
         if config.project.key_files:
             project_data["key_files"] = config.project.key_files
         if config.project.test_command:
             project_data["test_command"] = config.project.test_command
+        if config.project.test_instructions:
+            project_data["test_instructions"] = config.project.test_instructions
         if config.project.agent_instructions:
             project_data["agent_instructions"] = config.project.agent_instructions
         data["project"] = project_data
@@ -390,6 +440,34 @@ def save_config(config: Config, project_root: Path | None = None) -> None:
         agent_data["retry_delay"] = config.agent.retry_delay
     if agent_data:
         data["agent"] = agent_data
+
+    # Review config (only save non-default values)
+    review_data: dict[str, Any] = {}
+    if config.review.automerge:
+        review_data["automerge"] = config.review.automerge
+    if not config.review.test_before_merge:
+        review_data["test_before_merge"] = config.review.test_before_merge
+    if not config.review.require_all_tests_pass:
+        review_data["require_all_tests_pass"] = config.review.require_all_tests_pass
+    if config.review.tools:
+        # Save review-specific tools config
+        review_tools_data: dict[str, Any] = {}
+        if config.review.tools.permission_mode != "default":
+            review_tools_data["permission_mode"] = config.review.tools.permission_mode
+        if config.review.tools.allowed_cli:
+            review_tools_data["allowed_cli"] = config.review.tools.allowed_cli
+        if config.review.tools.allowed_tools:
+            review_tools_data["allowed_tools"] = config.review.tools.allowed_tools
+        if config.review.tools.disallowed_tools:
+            review_tools_data["disallowed_tools"] = config.review.tools.disallowed_tools
+        if config.review.tools.add_dirs:
+            review_tools_data["add_dirs"] = config.review.tools.add_dirs
+        if config.review.tools.skip_permissions:
+            review_tools_data["skip_permissions"] = config.review.tools.skip_permissions
+        if review_tools_data:
+            review_data["tools"] = review_tools_data
+    if review_data:
+        data["review"] = review_data
 
     with open(config_path, "w") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
