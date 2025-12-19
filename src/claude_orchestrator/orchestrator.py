@@ -194,6 +194,49 @@ Create a commit with a descriptive message following project conventions.
 """
 
 
+def build_claude_args(config: Optional[Config], auto_approve: bool = False) -> list[str]:
+    """Build Claude CLI arguments from config.
+
+    Args:
+        config: Project configuration
+        auto_approve: Whether to auto-approve agent plans
+
+    Returns:
+        List of CLI arguments
+    """
+    args = []
+
+    if config and config.tools:
+        tools = config.tools
+
+        # Permission mode
+        if tools.skip_permissions or auto_approve:
+            args.append("--dangerously-skip-permissions")
+        elif tools.permission_mode != "default":
+            args.extend(["--permission-mode", tools.permission_mode])
+
+        # Allowed tools - combine CLI tools with explicit allowed tools
+        allowed = list(tools.allowed_tools)
+        for cli_tool in tools.allowed_cli:
+            # Convert CLI tool name to Bash pattern
+            allowed.append(f"Bash({cli_tool}:*)")
+        if allowed:
+            args.extend(["--allowedTools"] + allowed)
+
+        # Disallowed tools
+        if tools.disallowed_tools:
+            args.extend(["--disallowedTools"] + tools.disallowed_tools)
+
+        # Additional directories
+        for add_dir in tools.add_dirs:
+            args.extend(["--add-dir", add_dir])
+
+    elif auto_approve:
+        args.append("--dangerously-skip-permissions")
+
+    return args
+
+
 async def run_agent(
     task: TaskConfig,
     worktree_path: Path,
@@ -219,10 +262,9 @@ async def run_agent(
     """
     prompt = build_agent_prompt(task, provider_status, project_context, config)
 
-    # Build claude command
+    # Build claude command with tools/permissions config
     cmd = ["claude"]
-    if auto_approve:
-        cmd.extend(["--dangerously-skip-permissions"])
+    cmd.extend(build_claude_args(config, auto_approve))
     cmd.extend(["--print", "--verbose", "-p", prompt])
 
     # Open log file if specified

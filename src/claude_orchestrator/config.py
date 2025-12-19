@@ -51,6 +51,30 @@ class WorkflowConfig:
 
 
 @dataclass
+class ToolsConfig:
+    """Tools and permissions configuration for Claude Code agents."""
+
+    # Permission mode: default, acceptEdits, plan, dontAsk, bypassPermissions
+    permission_mode: str = "default"
+    
+    # Allowed CLI tools (e.g., ["gh", "az", "aws", "docker"])
+    # These get added to --allowedTools as Bash patterns
+    allowed_cli: list[str] = field(default_factory=list)
+    
+    # Explicitly allowed tools (e.g., ["Bash(git:*)", "Edit", "Read"])
+    allowed_tools: list[str] = field(default_factory=list)
+    
+    # Explicitly disallowed tools (e.g., ["Bash(rm:*)"])
+    disallowed_tools: list[str] = field(default_factory=list)
+    
+    # Additional directories to allow access
+    add_dirs: list[str] = field(default_factory=list)
+    
+    # Dangerously skip all permissions (only for sandboxed environments)
+    skip_permissions: bool = False
+
+
+@dataclass
 class MCPConfig:
     """MCP-related configuration."""
 
@@ -76,6 +100,7 @@ class Config:
     mcps: MCPConfig = field(default_factory=MCPConfig)
     project: ProjectConfig = field(default_factory=ProjectConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
 
     # Runtime settings (not persisted)
     project_root: Optional[Path] = None
@@ -219,6 +244,18 @@ def load_config(project_root: Optional[Path] = None) -> Config:
             auto_pr=workflow_data.get("auto_pr", True),
         )
 
+    # Parse tools config
+    if "tools" in data:
+        tools_data = data["tools"]
+        config.tools = ToolsConfig(
+            permission_mode=tools_data.get("permission_mode", "default"),
+            allowed_cli=tools_data.get("allowed_cli", []),
+            allowed_tools=tools_data.get("allowed_tools", []),
+            disallowed_tools=tools_data.get("disallowed_tools", []),
+            add_dirs=tools_data.get("add_dirs", []),
+            skip_permissions=tools_data.get("skip_permissions", False),
+        )
+
     return config
 
 
@@ -287,6 +324,23 @@ def save_config(config: Config, project_root: Optional[Path] = None) -> None:
         workflow_data["auto_pr"] = config.workflow.auto_pr
     if workflow_data:
         data["workflow"] = workflow_data
+
+    # Tools config (only save non-default values)
+    tools_data: dict[str, Any] = {}
+    if config.tools.permission_mode != "default":
+        tools_data["permission_mode"] = config.tools.permission_mode
+    if config.tools.allowed_cli:
+        tools_data["allowed_cli"] = config.tools.allowed_cli
+    if config.tools.allowed_tools:
+        tools_data["allowed_tools"] = config.tools.allowed_tools
+    if config.tools.disallowed_tools:
+        tools_data["disallowed_tools"] = config.tools.disallowed_tools
+    if config.tools.add_dirs:
+        tools_data["add_dirs"] = config.tools.add_dirs
+    if config.tools.skip_permissions:
+        tools_data["skip_permissions"] = config.tools.skip_permissions
+    if tools_data:
+        data["tools"] = tools_data
 
     with open(config_path, "w") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)

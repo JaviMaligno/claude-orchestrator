@@ -207,6 +207,11 @@ Available keys:
 - `workflow.auto_approve` - Auto-approve agent actions (true/false)
 - `workflow.auto_pr` - Create PRs automatically (true/false)
 - `workflow.stop_after_generate` - Stop after generating tasks (true/false)
+- `tools.permission_mode` - Permission mode (default, acceptEdits, plan, dontAsk, bypassPermissions)
+- `tools.allowed_cli` - Comma-separated CLI tools to allow (gh, az, aws, docker, etc.)
+- `tools.allowed_tools` - Comma-separated tool patterns (Bash(git:*), Edit, Read)
+- `tools.disallowed_tools` - Comma-separated tool patterns to deny
+- `tools.skip_permissions` - Skip all permissions (true/false, DANGEROUS)
 
 ### `run`
 
@@ -278,6 +283,89 @@ workflow:
   auto_pr: true        # Create PRs automatically
   stop_after_generate: false  # Fine-grained: stop after task generation
 ```
+
+## Tools & Permissions
+
+Configure which CLI tools agents can use and their permission levels:
+
+### Allow CLI Tools
+
+```bash
+# Allow specific CLI tools (gh, aws, az, docker, etc.)
+claude-orchestrator config tools.allowed_cli "gh,az,aws,docker"
+
+# View current settings
+claude-orchestrator config tools.allowed_cli
+```
+
+These get converted to `--allowedTools Bash(gh:*) Bash(az:*) ...` when running agents.
+
+### Permission Modes
+
+```bash
+# Set permission mode for agents
+claude-orchestrator config tools.permission_mode acceptEdits
+```
+
+Available modes:
+| Mode | Description |
+|------|-------------|
+| `default` | Normal permissions with prompts |
+| `acceptEdits` | Auto-accept file edits |
+| `plan` | Show plan before executing |
+| `dontAsk` | Don't ask for confirmations |
+| `bypassPermissions` | Skip all permission checks |
+
+### Advanced Tool Configuration
+
+```bash
+# Allow specific tools patterns
+claude-orchestrator config tools.allowed_tools "Bash(git:*),Edit,Read"
+
+# Disallow dangerous tools
+claude-orchestrator config tools.disallowed_tools "Bash(rm:*),Bash(sudo:*)"
+
+# Skip all permissions (only for sandboxed environments!)
+claude-orchestrator config tools.skip_permissions true
+
+# Add extra directories for tool access
+claude-orchestrator config tools.add_dirs "/path/to/shared/config"
+```
+
+### Configuration in `.claude-orchestrator.yaml`
+
+```yaml
+tools:
+  permission_mode: acceptEdits
+  allowed_cli:
+    - gh
+    - az
+    - aws
+    - docker
+  allowed_tools:
+    - "Bash(git:*)"
+    - Edit
+    - Read
+  disallowed_tools:
+    - "Bash(rm:-rf:*)"
+  add_dirs:
+    - ../shared-config
+  skip_permissions: false  # Only for sandboxed environments!
+```
+
+### Project-specific vs CLAUDE.md
+
+You have two options for tool configuration:
+
+1. **`.claude-orchestrator.yaml`** (recommended for orchestrator tasks)
+   - Centralized configuration
+   - Applies to all agents launched by the orchestrator
+   - Version controlled with your project
+
+2. **`CLAUDE.md`** in your project
+   - Applies to all Claude Code sessions in that project
+   - Good for general project instructions
+   - Not specific to orchestrator tasks
 
 ## Optional MCPs
 

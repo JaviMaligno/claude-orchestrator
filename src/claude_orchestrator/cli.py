@@ -665,6 +665,16 @@ def config(
         console.print(f"  workflow.stop_after_generate: {cfg.workflow.stop_after_generate}")
         console.print(f"  workflow.auto_approve: {cfg.workflow.auto_approve}")
         console.print(f"  workflow.auto_pr: {cfg.workflow.auto_pr}")
+        console.print("[dim]# Tools & Permissions[/dim]")
+        console.print(f"  tools.permission_mode: {cfg.tools.permission_mode}")
+        if cfg.tools.allowed_cli:
+            console.print(f"  tools.allowed_cli: {', '.join(cfg.tools.allowed_cli)}")
+        if cfg.tools.allowed_tools:
+            console.print(f"  tools.allowed_tools: {', '.join(cfg.tools.allowed_tools)}")
+        if cfg.tools.disallowed_tools:
+            console.print(f"  tools.disallowed_tools: {', '.join(cfg.tools.disallowed_tools)}")
+        if cfg.tools.skip_permissions:
+            console.print(f"  tools.skip_permissions: {cfg.tools.skip_permissions}")
         if cfg.mcps.enabled:
             console.print("[dim]# MCPs[/dim]")
             console.print(f"  mcps.enabled: {', '.join(cfg.mcps.enabled)}")
@@ -702,6 +712,16 @@ def config(
             console.print(str(cfg.workflow.auto_approve).lower())
         elif key == "workflow.auto_pr":
             console.print(str(cfg.workflow.auto_pr).lower())
+        elif key == "tools.permission_mode":
+            console.print(cfg.tools.permission_mode)
+        elif key == "tools.allowed_cli":
+            console.print(",".join(cfg.tools.allowed_cli) if cfg.tools.allowed_cli else "")
+        elif key == "tools.allowed_tools":
+            console.print(",".join(cfg.tools.allowed_tools) if cfg.tools.allowed_tools else "")
+        elif key == "tools.disallowed_tools":
+            console.print(",".join(cfg.tools.disallowed_tools) if cfg.tools.disallowed_tools else "")
+        elif key == "tools.skip_permissions":
+            console.print(str(cfg.tools.skip_permissions).lower())
         else:
             console.print(f"[red]Unknown key: {key}[/red]")
         return
@@ -732,6 +752,20 @@ def config(
         cfg.workflow.auto_approve = value.lower() in ("true", "1", "yes")
     elif key == "workflow.auto_pr":
         cfg.workflow.auto_pr = value.lower() in ("true", "1", "yes")
+    elif key == "tools.permission_mode":
+        valid_modes = ("default", "acceptEdits", "plan", "dontAsk", "bypassPermissions")
+        if value not in valid_modes:
+            console.print(f"[red]Invalid mode: {value}. Use one of: {', '.join(valid_modes)}[/red]")
+            raise typer.Exit(1)
+        cfg.tools.permission_mode = value
+    elif key == "tools.allowed_cli":
+        cfg.tools.allowed_cli = [v.strip() for v in value.split(",") if v.strip()]
+    elif key == "tools.allowed_tools":
+        cfg.tools.allowed_tools = [v.strip() for v in value.split(",") if v.strip()]
+    elif key == "tools.disallowed_tools":
+        cfg.tools.disallowed_tools = [v.strip() for v in value.split(",") if v.strip()]
+    elif key == "tools.skip_permissions":
+        cfg.tools.skip_permissions = value.lower() in ("true", "1", "yes")
     else:
         console.print(f"[red]Unknown key: {key}[/red]")
         raise typer.Exit(1)
